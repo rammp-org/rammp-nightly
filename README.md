@@ -21,19 +21,22 @@ Images (latest known-good, or a pinned dated set):
     docker pull ghcr.io/rammp-org/<image>:nightly
     docker pull ghcr.io/rammp-org/<image>:nightly-YYYYMMDD
 
-From source, using the manifest for a set:
+From source, using a blessed set's manifest (written under `manifests/kinova-arm/`):
 
-    vcs import src < manifests/kinova-arm/<set>.repos
+    vcs import src < manifests/kinova-arm/<set>.repos   # once a set has been blessed
 
 ## The four images
 
-rammp-base, rammp-cuda, rammp-curobo, kinova-gen3-ros2. Each is published to its own
-repo's ghcr package (`ghcr.io/rammp-org/<image>`).
+rammp-base, rammp-cuda, rammp-curobo, kinova-gen3-ros2. rammp-base and rammp-cuda publish
+from RAMMP-docker's packages; rammp-curobo and kinova-gen3-ros2 from their own repos'
+packages (`ghcr.io/rammp-org/<image>`).
 
 ## Immutability
 
 Dated sets (`nightly-YYYYMMDD` tags and their manifests) are never rebuilt or overwritten;
-the manifest writer refuses to touch an existing set. The `:nightly` tag moves only when a
+the manifest writer refuses to touch an existing set, and dated tags are never pushed over.
+Sets with an `-rcN` suffix (`nightly-YYYYMMDD-rcN`) are rehearsal/pre-flight sets, not nightly
+channel sets. The `:nightly` tag moves only when a
 whole set goes green.
 
 ## Red nights
