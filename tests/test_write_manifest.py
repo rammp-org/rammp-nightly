@@ -54,3 +54,27 @@ def test_refuses_missing_member_sha(tmp_path):
     r = run(tmp_path, shas=incomplete, set_id="nightly-20261003")
     assert r.returncode == 1
     assert "RAMMP-CuRobo" in r.stderr
+
+
+def test_refuses_malformed_set_id(tmp_path):
+    for bad in ["20261002", "nightly-2026", "nightly-20261002-rc", "../x"]:
+        r = run(tmp_path, set_id=bad)
+        assert r.returncode == 1, bad
+        assert "set-id" in r.stderr
+
+
+def test_accepts_rc_set_id(tmp_path):
+    assert run(tmp_path, set_id="nightly-20261002-rc12").returncode == 0
+
+
+def test_refuses_missing_image_digest(tmp_path):
+    r = run(tmp_path, digests={k: v for k, v in DIGESTS.items()
+                               if k != "rammp-cuda"})
+    assert r.returncode == 1
+    assert "rammp-cuda" in r.stderr
+
+
+def test_refuses_extra_image_digest(tmp_path):
+    r = run(tmp_path, digests={**DIGESTS, "surprise": "sha256:0"})
+    assert r.returncode == 1
+    assert "surprise" in r.stderr

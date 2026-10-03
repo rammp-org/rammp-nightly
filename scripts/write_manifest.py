@@ -1,6 +1,7 @@
 """Write an immutable blessed set: <id>.repos (vcstool) + <id>.images.json."""
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,10 @@ def main():
     p.add_argument("--out-dir", required=True)
     a = p.parse_args()
 
+    if not re.fullmatch(r"nightly-[0-9]{8}(-rc[0-9]+)?", a.set_id):
+        sys.exit(f"error: --set-id {a.set_id!r} must match "
+                 "nightly-YYYYMMDD[-rcN]")
+
     stack = yaml.safe_load(Path(a.stack).read_text())
     shas = json.loads(Path(a.shas).read_text())
     digests = json.loads(Path(a.digests).read_text())
@@ -30,6 +35,12 @@ def main():
     for name in stack["members"]:
         if name not in shas:
             sys.exit(f"error: no SHA for member {name}")
+
+    expected = set(stack["images"])
+    if set(digests) != expected:
+        diff = sorted(expected ^ set(digests))
+        sys.exit("error: digests must match the stack's images exactly; "
+                 f"missing or unexpected: {', '.join(diff)}")
 
     repos = {"repositories": {
         name: {"type": "git", "url": m["url"], "version": shas[name]}

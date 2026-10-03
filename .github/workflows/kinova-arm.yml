@@ -1,0 +1,360 @@
+# Nightly integration channel for the kinova arm stack.
+#
+# Pins every member of stacks/kinova-arm.yml to one SHA at one instant, builds
+# the four images from exactly those SHAs, and -- only if all of it is green --
+# "blesses" the set: moves the `:nightly` aliases and commits an immutable
+# manifest under manifests/kinova-arm/. A red night changes nothing; `:nightly`
+# keeps serving the last green set.
+#
+# Build jobs push DATED tags only (:<set_id>). The bless job is the sole
+# promoter of `:nightly`.
+name: kinova-arm-nightly
+
+on:
+  # Goes live in Task 3, once a manual dispatch has passed end to end.
+  # schedule:
+  #   - cron: "0 9 * * *"
+  workflow_dispatch:
+    inputs:
+      interfaces_ref:
+        description: "rammp-interfaces-ros2 ref (default: the stack branch)"
+        required: false
+        default: ""
+      docker_ref:
+        description: "RAMMP-docker ref (default: the stack branch)"
+        required: false
+        default: ""
+      driver_ref:
+        description: "kinova-gen3-driver ref (default: the stack branch)"
+        required: false
+        default: ""
+      curobo_ref:
+        description: "RAMMP-CuRobo ref (default: the stack branch)"
+        required: false
+        default: ""
+      node_ref:
+        description: "kinova-gen3-ros2 ref (default: the stack branch)"
+        required: false
+        default: ""
+      rc:
+        description: "Release-candidate suffix, e.g. rc1 (default: none)"
+        required: false
+        default: ""
+
+# One nightly at a time. Never cancel a running build: a half-built set is
+# worth nothing, and the next run would just redo the hour-long CuRobo compile.
+concurrency:
+  group: kinova-arm-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # bless commits the manifest to main
+  issues: write     # report-failure files the nightly-red issue
+
+env:
+  REGISTRY: ghcr.io/rammp-org
+
+jobs:
+  # ---------------------------------------------------------------- resolve
+  # Pin every member to an exact SHA, once. Every later job builds from these
+  # SHAs, never from a branch name, so the set is consistent even if a member
+  # moves mid-run.
+  resolve:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    outputs:
+      set_id: ${{ steps.pin.outputs.set_id }}
+      shas: ${{ steps.pin.outputs.shas }}
+      refs: ${{ steps.pin.outputs.refs }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+      - name: Pin members to SHAs
+        id: pin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC: ${{ inputs.rc }}
+          OVERRIDE_rammp-interfaces-ros2: ${{ inputs.interfaces_ref }}
+          OVERRIDE_RAMMP-docker: ${{ inputs.docker_ref }}
+          OVERRIDE_kinova-gen3-driver: ${{ inputs.driver_ref }}
+          OVERRIDE_RAMMP-CuRobo: ${{ inputs.curobo_ref }}
+          OVERRIDE_kinova-gen3-ros2: ${{ inputs.node_ref }}
+        run: |
+          set -euo pipefail
+
+          set_id="nightly-$(date -u +%Y%m%d)"
+          if [ -n "$RC" ]; then
+            if ! [[ "$RC" =~ ^rc[0-9]+$ ]]; then
+              echo "::error::rc must look like rc1, got '$RC'"
+              exit 1
+            fi
+            set_id="$set_id-$RC"
+          fi
+
+          # Blessed sets are immutable: never reuse an id that already has a manifest.
+          if git ls-files --error-unmatch "manifests/kinova-arm/$set_id.repos" >/dev/null 2>&1; then
+            echo "::error::$set_id is already blessed (manifests/kinova-arm/$set_id.repos is tracked); use an rc suffix"
+            exit 1
+          fi
+
+          members=$(python3 scripts/stack_members.py stacks/kinova-arm.yml)
+          shas='{}'
+          refs='{}'
+          for name in $(jq -r 'keys[]' <<<"$members"); do
+            # Member names contain hyphens, so they are not valid shell
+            # variable names; read the override through printenv.
+            ref=$(printenv "OVERRIDE_$name" || true)
+            if [ -z "$ref" ]; then
+              ref=$(jq -r --arg n "$name" '.[$n].branch' <<<"$members")
+            fi
+            sha=$(gh api "repos/rammp-org/$name/commits/$ref" -q .sha)
+            if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::could not resolve $name@$ref to a SHA (got '$sha')"
+              exit 1
+            fi
+            echo "$name@$ref -> $sha"
+            shas=$(jq -c --arg n "$name" --arg s "$sha" '.[$n]=$s' <<<"$shas")
+            refs=$(jq -c --arg n "$name" --arg r "$ref" '.[$n]=$r' <<<"$refs")
+          done
+
+          {
+            echo "set_id=$set_id"
+            echo "shas=$shas"
+            echo "refs=$refs"
+          } >>"$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------- base
+  # rammp-base and rammp-cuda, both built by RAMMP-docker's own Makefile.
+  base:
+    needs: resolve
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    env:
+      SET_ID: ${{ needs.resolve.outputs.set_id }}
+      INTERFACES_SHA: ${{ fromJSON(needs.resolve.outputs.shas)['rammp-interfaces-ros2'] }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: rammp-org/RAMMP-docker
+          ref: ${{ fromJSON(needs.resolve.outputs.shas)['RAMMP-docker'] }}
+      # Same disk reclaim as RAMMP-docker's own CI; the CUDA image is large.
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+      - name: Build rammp-base and rammp-cuda
+        run: make base cuda VERSION="$SET_ID" INTERFACES_REF="$INTERFACES_SHA"
+      # RAMMP-docker's own smoke gate for both images.
+      - name: Smoke test
+        run: make test VERSION="$SET_ID"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NIGHTLY_GHCR_TOKEN }}
+      # Explicit tag + push of the dated tag only. NEVER `make push`: it also
+      # moves the `:humble` release alias, which belongs to real releases.
+      - name: Push dated tags
+        run: |
+          set -euo pipefail
+          for img in rammp-base rammp-cuda; do
+            docker tag "$img:$SET_ID" "$REGISTRY/$img:$SET_ID"
+            docker push "$REGISTRY/$img:$SET_ID"
+          done
+
+  # ---------------------------------------------------------------- planner
+  # CuRobo, unmodified. ~1 h compile and ~25 GB, hence the long timeout.
+  planner:
+    needs: resolve
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 180
+    env:
+      SET_ID: ${{ needs.resolve.outputs.set_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: rammp-org/RAMMP-CuRobo
+          ref: ${{ fromJSON(needs.resolve.outputs.shas)['RAMMP-CuRobo'] }}
+      - name: Free disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+      - name: Build rammp-curobo
+        run: docker build -f docker/Dockerfile -t "$REGISTRY/rammp-curobo:$SET_ID" .
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NIGHTLY_GHCR_TOKEN }}
+      - name: Push dated tag
+        run: docker push "$REGISTRY/rammp-curobo:$SET_ID"
+
+  # ------------------------------------------------------------------- node
+  # kinova-gen3-ros2 on top of tonight's rammp-base, with tonight's driver and
+  # CuRobo. Two build-time patches steer it there; both ASSERT they took
+  # effect, because a patch that silently matches nothing would build against
+  # stale pins and still look green.
+  node:
+    needs: [resolve, base]
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 120
+    env:
+      SET_ID: ${{ needs.resolve.outputs.set_id }}
+      DRIVER_SHA: ${{ fromJSON(needs.resolve.outputs.shas)['kinova-gen3-driver'] }}
+      CUROBO_SHA: ${{ fromJSON(needs.resolve.outputs.shas)['RAMMP-CuRobo'] }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: rammp-org/kinova-gen3-ros2
+          ref: ${{ fromJSON(needs.resolve.outputs.shas)['kinova-gen3-ros2'] }}
+      - name: Patch Dockerfile base to tonight's rammp-base
+        run: |
+          set -euo pipefail
+          # Match the FROM generically; the release pin in it changes over time.
+          from='^FROM ghcr.io/rammp-org/rammp-base:'
+          test "$(grep -c "$from" Dockerfile)" = 1 \
+            || { echo "::error::expected exactly one rammp-base FROM line in Dockerfile"; exit 1; }
+          sed -i -E "s#($from)[^[:space:]]+#\1$SET_ID#" Dockerfile
+          grep -qE "${from}${SET_ID}([[:space:]]|\$)" Dockerfile \
+            || { echo "::error::Dockerfile FROM patch did not take effect"; exit 1; }
+          grep "$from" Dockerfile
+      - name: Patch kinova_gen3.repos CuRobo version to tonight's SHA
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          sha = os.environ["CUROBO_SHA"]
+          text = open("kinova_gen3.repos").read()
+          # Inside the RAMMP-CuRobo entry only: continuation lines must be
+          # indented deeper than the entry key, so we cannot leak into the next one.
+          pattern = re.compile(
+              r"(?P<head>^(?P<ind>[ \t]*)RAMMP-CuRobo:[ \t]*\n"
+              r"(?:(?P=ind)[ \t]+(?!version:)[^\n]*\n)*?"
+              r"(?P=ind)[ \t]+version:[ \t]*)(?P<old>[^\s#]+)",
+              re.M)
+          new, n = pattern.subn(lambda m: m.group("head") + sha, text)
+          if n != 1:
+              sys.exit(f"error: expected exactly 1 RAMMP-CuRobo version line, patched {n}")
+          if new == text:
+              sys.exit("error: CuRobo version already equals the target SHA; patch is a no-op")
+          open("kinova_gen3.repos", "w").write(new)
+          PY
+          grep -q "version: *$CUROBO_SHA" kinova_gen3.repos \
+            || { echo "::error::kinova_gen3.repos patch did not take effect"; exit 1; }
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NIGHTLY_GHCR_TOKEN }}
+      # CORE_REF is the repo's own override for the driver ref in
+      # kinova_gen3.repos. The Dockerfile fetches the KORTEX SDK itself.
+      - name: Build kinova-gen3-ros2
+        run: |
+          docker build \
+            --build-arg KINOVA_ENABLE_KORTEX=ON \
+            --build-arg CORE_REF="$DRIVER_SHA" \
+            -t "$REGISTRY/kinova-gen3-ros2:$SET_ID" .
+      - name: Push dated tag
+        run: docker push "$REGISTRY/kinova-gen3-ros2:$SET_ID"
+
+  # ------------------------------------------------------------------ bless
+  # The ONLY promoter. Reached only when every build job is green. Order:
+  # record digests, write the manifest locally, move the aliases, then commit.
+  # A failure before the alias move leaves `:nightly` on the last green set.
+  bless:
+    needs: [resolve, base, planner, node]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      SET_ID: ${{ needs.resolve.outputs.set_id }}
+      SHAS: ${{ needs.resolve.outputs.shas }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.NIGHTLY_GHCR_TOKEN }}
+      - name: Collect digests and write manifest
+        run: |
+          set -euo pipefail
+          images=$(python3 -c 'import sys,yaml; print(*yaml.safe_load(open(sys.argv[1]))["images"])' stacks/kinova-arm.yml)
+          digests='{}'
+          for img in $images; do
+            d=$(docker buildx imagetools inspect "$REGISTRY/$img:$SET_ID" --format '{{json .Manifest}}' | jq -r .digest)
+            if ! [[ "$d" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::bad digest for $img:$SET_ID ('$d')"
+              exit 1
+            fi
+            echo "$img $d"
+            digests=$(jq -c --arg k "$img" --arg v "$d" '.[$k]=$v' <<<"$digests")
+          done
+          echo "$SHAS" >"$RUNNER_TEMP/shas.json"
+          echo "$digests" >"$RUNNER_TEMP/digests.json"
+          python3 scripts/write_manifest.py \
+            --stack stacks/kinova-arm.yml \
+            --set-id "$SET_ID" \
+            --shas "$RUNNER_TEMP/shas.json" \
+            --digests "$RUNNER_TEMP/digests.json" \
+            --out-dir manifests/kinova-arm
+      # Registry-side copy: `:nightly` becomes the same manifest, same digest,
+      # as the dated tag. No rebuild, no re-push.
+      - name: Move :nightly aliases
+        run: |
+          set -euo pipefail
+          images=$(python3 -c 'import sys,yaml; print(*yaml.safe_load(open(sys.argv[1]))["images"])' stacks/kinova-arm.yml)
+          for img in $images; do
+            docker buildx imagetools create -t "$REGISTRY/$img:nightly" "$REGISTRY/$img:$SET_ID"
+            want=$(jq -r --arg k "$img" '.images[$k]' "manifests/kinova-arm/$SET_ID.images.json")
+            got=$(docker buildx imagetools inspect "$REGISTRY/$img:nightly" --format '{{json .Manifest}}' | jq -r .digest)
+            test "$want" = "$got" \
+              || { echo "::error::$img:nightly digest $got != blessed $want"; exit 1; }
+          done
+      - name: Commit manifest to main
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifests/kinova-arm
+          git commit -m "bless $SET_ID"
+          git push origin HEAD:main
+      - name: Close open nightly-red issue
+        run: |
+          set -euo pipefail
+          n=$(gh issue list --label nightly-red --state open --limit 1 --json number -q '.[0].number')
+          if [ -n "$n" ]; then
+            gh issue close "$n" --comment "Green again: $SET_ID blessed ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
+          fi
+
+  # --------------------------------------------------------- report-failure
+  # One standing issue, not one per night: comment if it is open, else file it.
+  report-failure:
+    needs: [resolve, base, planner, node, bless]
+    if: failure()
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: File or update the nightly-red issue
+        run: |
+          set -euo pipefail
+          body="The kinova-arm nightly failed: $RUN_URL
+
+          \`:nightly\` still serves the last green set."
+          gh label create nightly-red --color D93F0B \
+            --description "kinova-arm nightly is red" 2>/dev/null || true
+          n=$(gh issue list --label nightly-red --state open --limit 1 --json number -q '.[0].number')
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "$body"
+          else
+            gh issue create --label nightly-red \
+              --title "kinova-arm nightly is red" --body "$body"
+          fi
