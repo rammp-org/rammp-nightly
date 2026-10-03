@@ -235,8 +235,6 @@ jobs:
           new, n = pattern.subn(lambda m: m.group("head") + sha, text)
           if n != 1:
               sys.exit(f"error: expected exactly 1 RAMMP-CuRobo version line, patched {n}")
-          if new == text:
-              sys.exit("error: CuRobo version already equals the target SHA; patch is a no-op")
           open("kinova_gen3.repos", "w").write(new)
           PY
           grep -q "version: *$CUROBO_SHA" kinova_gen3.repos \
@@ -302,19 +300,10 @@ jobs:
             --shas "$RUNNER_TEMP/shas.json" \
             --digests "$RUNNER_TEMP/digests.json" \
             --out-dir manifests/kinova-arm
-      # Registry-side copy: `:nightly` becomes the same manifest, same digest,
-      # as the dated tag. No rebuild, no re-push.
-      - name: Move :nightly aliases
-        run: |
-          set -euo pipefail
-          images=$(python3 -c 'import sys,yaml; print(*yaml.safe_load(open(sys.argv[1]))["images"])' stacks/kinova-arm.yml)
-          for img in $images; do
-            docker buildx imagetools create -t "$REGISTRY/$img:nightly" "$REGISTRY/$img:$SET_ID"
-            want=$(jq -r --arg k "$img" '.images[$k]' "manifests/kinova-arm/$SET_ID.images.json")
-            got=$(docker buildx imagetools inspect "$REGISTRY/$img:nightly" --format '{{json .Manifest}}' | jq -r .digest)
-            test "$want" = "$got" \
-              || { echo "::error::$img:nightly digest $got != blessed $want"; exit 1; }
-          done
+      # Manifest first, aliases second. If the push fails, nothing is promoted
+      # and the set id stays reusable. If an alias move fails after the push,
+      # the manifest is still truthful (every dated image exists with the
+      # recorded digest) and the id is blocked, so the rerun uses an rc suffix.
       - name: Commit manifest to main
         run: |
           set -euo pipefail
@@ -323,10 +312,32 @@ jobs:
           git add manifests/kinova-arm
           git commit -m "bless $SET_ID"
           git push origin HEAD:main
-      - name: Close open nightly-red issue
+      # Registry-side copy: `:nightly` becomes the same manifest, same digest,
+      # as the dated tag. No rebuild, no re-push.
+      - name: Move :nightly aliases
         run: |
           set -euo pipefail
-          n=$(gh issue list --label nightly-red --state open --limit 1 --json number -q '.[0].number')
+          images=$(python3 -c 'import sys,yaml; print(*yaml.safe_load(open(sys.argv[1]))["images"])' stacks/kinova-arm.yml)
+          # Verify every dated tag still matches the manifest BEFORE the first
+          # move, so a mismatch cannot leave the set half-promoted.
+          for img in $images; do
+            want=$(jq -r --arg k "$img" '.images[$k]' "manifests/kinova-arm/$SET_ID.images.json")
+            got=$(docker buildx imagetools inspect "$REGISTRY/$img:$SET_ID" --format '{{json .Manifest}}' | jq -r .digest)
+            test "$want" = "$got" \
+              || { echo "::error::$img:$SET_ID digest $got != blessed $want"; exit 1; }
+          done
+          for img in $images; do
+            docker buildx imagetools create -t "$REGISTRY/$img:nightly" "$REGISTRY/$img:$SET_ID"
+            want=$(jq -r --arg k "$img" '.images[$k]' "manifests/kinova-arm/$SET_ID.images.json")
+            got=$(docker buildx imagetools inspect "$REGISTRY/$img:nightly" --format '{{json .Manifest}}' | jq -r .digest)
+            test "$want" = "$got" \
+              || { echo "::error::$img:nightly digest $got != blessed $want"; exit 1; }
+          done
+      - name: Close open nightly-red issue
+        continue-on-error: true  # the set is already blessed; do not turn it red
+        run: |
+          set -euo pipefail
+          n=$(gh issue list --label nightly-red --state open --limit 1 --json number -q '.[0].number // empty')
           if [ -n "$n" ]; then
             gh issue close "$n" --comment "Green again: $SET_ID blessed ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)."
           fi
@@ -351,7 +362,7 @@ jobs:
           \`:nightly\` still serves the last green set."
           gh label create nightly-red --color D93F0B \
             --description "kinova-arm nightly is red" 2>/dev/null || true
-          n=$(gh issue list --label nightly-red --state open --limit 1 --json number -q '.[0].number')
+          n=$(gh issue list --label nightly-red --state open --limit 1 --json number -q '.[0].number // empty')
           if [ -n "$n" ]; then
             gh issue comment "$n" --body "$body"
           else
