@@ -47,9 +47,8 @@ concurrency:
   group: kinova-arm-nightly
   cancel-in-progress: false
 
-permissions:
-  contents: write   # bless commits the manifest to main
-  issues: write     # report-failure files the nightly-red issue
+# Least privilege: nothing at workflow level; each job asks for what it needs.
+permissions: {}
 
 env:
   REGISTRY: ghcr.io/rammp-org
@@ -62,6 +61,8 @@ jobs:
   resolve:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       set_id: ${{ steps.pin.outputs.set_id }}
       shas: ${{ steps.pin.outputs.shas }}
@@ -98,6 +99,16 @@ jobs:
             exit 1
           fi
 
+          # The checkout above can predate a bless commit (a queued duplicate run),
+          # so also ask live main. 404 = free; anything else unexpected = fail.
+          if out=$(gh api "repos/$GITHUB_REPOSITORY/contents/manifests/kinova-arm/$set_id.repos?ref=main" 2>&1); then
+            echo "::error::$set_id is already blessed on main; use an rc suffix"
+            exit 1
+          elif ! grep -q "HTTP 404" <<<"$out"; then
+            echo "::error::could not check main for $set_id: $out"
+            exit 1
+          fi
+
           members=$(python3 scripts/stack_members.py stacks/kinova-arm.yml)
           shas='{}'
           refs='{}'
@@ -130,6 +141,8 @@ jobs:
     needs: resolve
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
+    permissions:
+      contents: read
     env:
       SET_ID: ${{ needs.resolve.outputs.set_id }}
       INTERFACES_SHA: ${{ fromJSON(needs.resolve.outputs.shas)['rammp-interfaces-ros2'] }}
@@ -138,6 +151,7 @@ jobs:
         with:
           repository: rammp-org/RAMMP-docker
           ref: ${{ fromJSON(needs.resolve.outputs.shas)['RAMMP-docker'] }}
+          persist-credentials: false  # foreign build recipes must not inherit a token
       # Same disk reclaim as RAMMP-docker's own CI; the CUDA image is large.
       - name: Free disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
@@ -153,12 +167,16 @@ jobs:
           password: ${{ secrets.NIGHTLY_GHCR_TOKEN }}
       # Explicit tag + push of the dated tag only. NEVER `make push`: it also
       # moves the `:humble` release alias, which belongs to real releases.
+      # Dated tags are immutable: refuse if one already exists on ghcr.
       - name: Push dated tags
         run: |
           set -euo pipefail
           for img in rammp-base rammp-cuda; do
-            docker tag "$img:$SET_ID" "$REGISTRY/$img:$SET_ID"
-            docker push "$REGISTRY/$img:$SET_ID"
+            REF="$REGISTRY/$img:$SET_ID"
+            docker buildx imagetools inspect "$REF" >/dev/null 2>&1 \
+              && { echo "::error::$REF already exists; dated tags are immutable"; exit 1; }
+            docker tag "$img:$SET_ID" "$REF"
+            docker push "$REF"
           done
 
   # ---------------------------------------------------------------- planner
@@ -167,6 +185,8 @@ jobs:
     needs: resolve
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 180
+    permissions:
+      contents: read
     env:
       SET_ID: ${{ needs.resolve.outputs.set_id }}
     steps:
@@ -174,6 +194,7 @@ jobs:
         with:
           repository: rammp-org/RAMMP-CuRobo
           ref: ${{ fromJSON(needs.resolve.outputs.shas)['RAMMP-CuRobo'] }}
+          persist-credentials: false  # foreign build recipes must not inherit a token
       - name: Free disk
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
       - name: Build rammp-curobo
@@ -184,7 +205,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.NIGHTLY_GHCR_TOKEN }}
       - name: Push dated tag
-        run: docker push "$REGISTRY/rammp-curobo:$SET_ID"
+        run: |
+          set -euo pipefail
+          REF="$REGISTRY/rammp-curobo:$SET_ID"
+          docker buildx imagetools inspect "$REF" >/dev/null 2>&1 \
+            && { echo "::error::$REF already exists; dated tags are immutable"; exit 1; }
+          docker push "$REF"
 
   # ------------------------------------------------------------------- node
   # kinova-gen3-ros2 on top of tonight's rammp-base, with tonight's driver and
@@ -195,6 +221,8 @@ jobs:
     needs: [resolve, base]
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 120
+    permissions:
+      contents: read
     env:
       SET_ID: ${{ needs.resolve.outputs.set_id }}
       DRIVER_SHA: ${{ fromJSON(needs.resolve.outputs.shas)['kinova-gen3-driver'] }}
@@ -204,6 +232,7 @@ jobs:
         with:
           repository: rammp-org/kinova-gen3-ros2
           ref: ${{ fromJSON(needs.resolve.outputs.shas)['kinova-gen3-ros2'] }}
+          persist-credentials: false  # foreign build recipes must not inherit a token
       - name: Patch Dockerfile base to tonight's rammp-base
         run: |
           set -euo pipefail
@@ -253,7 +282,12 @@ jobs:
             --build-arg CORE_REF="$DRIVER_SHA" \
             -t "$REGISTRY/kinova-gen3-ros2:$SET_ID" .
       - name: Push dated tag
-        run: docker push "$REGISTRY/kinova-gen3-ros2:$SET_ID"
+        run: |
+          set -euo pipefail
+          REF="$REGISTRY/kinova-gen3-ros2:$SET_ID"
+          docker buildx imagetools inspect "$REF" >/dev/null 2>&1 \
+            && { echo "::error::$REF already exists; dated tags are immutable"; exit 1; }
+          docker push "$REF"
 
   # ------------------------------------------------------------------ bless
   # The ONLY promoter. Reached only when every build job is green. Order:
@@ -263,6 +297,9 @@ jobs:
     needs: [resolve, base, planner, node]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
+    permissions:
+      contents: write   # push the manifest to main
+      issues: write     # close the nightly-red issue
     env:
       SET_ID: ${{ needs.resolve.outputs.set_id }}
       SHAS: ${{ needs.resolve.outputs.shas }}
@@ -349,6 +386,8 @@ jobs:
     if: failure()
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
+    permissions:
+      issues: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
