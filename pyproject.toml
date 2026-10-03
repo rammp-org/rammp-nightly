@@ -1,0 +1,9 @@
+[project]
+name = "rammp-nightly"
+version = "0.1.0"
+description = "Nightly integration sets for RAMMP stacks: orchestrates, blesses, records — the builds belong to the member repos"
+requires-python = ">=3.10"
+dependencies = ["pyyaml>=6"]
+
+[dependency-groups]
+dev = ["pytest>=8"]

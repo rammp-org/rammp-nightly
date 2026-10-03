@@ -1,0 +1,30 @@
+# The kinova arm stack.
+#
+# `members` is everything a set pins — resolved to exact SHAs at one instant
+# each night. `images` is what a blessed set publishes (each to the member
+# repo's own ghcr package). Build ORDER is not data: it lives in
+# .github/workflows/kinova-arm.yml, where GitHub's `needs:` graph expresses
+# it natively. Adding a stack = a file like this one + a workflow following
+# that pattern; the shared logic stays in scripts/.
+stack: kinova-arm
+members:
+  rammp-interfaces-ros2:
+    url: https://github.com/rammp-org/rammp-interfaces-ros2.git
+    branch: dev
+  RAMMP-docker:
+    url: https://github.com/rammp-org/RAMMP-docker.git
+    branch: main
+  kinova-gen3-driver:
+    url: https://github.com/rammp-org/kinova-gen3-driver.git
+    branch: dev
+  RAMMP-CuRobo:
+    url: https://github.com/rammp-org/RAMMP-CuRobo.git
+    branch: dev
+  kinova-gen3-ros2:
+    url: https://github.com/rammp-org/kinova-gen3-ros2.git
+    branch: dev
+images:
+  - rammp-base
+  - rammp-cuda
+  - rammp-curobo
+  - kinova-gen3-ros2
