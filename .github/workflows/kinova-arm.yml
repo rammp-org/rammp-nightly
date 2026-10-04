@@ -376,7 +376,14 @@ jobs:
       - name: Install crane
         run: |
           set -euo pipefail
-          curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+          # Pick the asset for the runner's own architecture: this job runs on
+          # an arm64 runner, but keep it correct under either.
+          case "$(uname -m)" in
+            x86_64)  arch=x86_64 ;;
+            aarch64) arch=arm64 ;;
+            *) echo "::error::unsupported runner arch $(uname -m)"; exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_${arch}.tar.gz" \
             | sudo tar xz -C /usr/local/bin crane
           crane version
       - name: Move :nightly aliases
