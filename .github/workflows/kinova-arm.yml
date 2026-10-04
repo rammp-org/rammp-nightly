@@ -366,8 +366,19 @@ jobs:
           git add manifests/kinova-arm
           git commit -m "bless $SET_ID"
           git push origin HEAD:main
-      # Registry-side copy: `:nightly` becomes the same manifest, same digest,
-      # as the dated tag. No rebuild, no re-push.
+      # Registry-side re-tag: `:nightly` becomes the same manifest, same
+      # digest, as the dated tag. crane, not `imagetools create`: imagetools
+      # REWRAPS a single-platform manifest in a new index, changing the digest
+      # (proved by the rc2 rehearsal, run 37216728681 — the post-move assert
+      # caught it). `crane tag` PUTs the existing manifest under the new tag,
+      # so the digest is preserved by construction. crane reads the docker
+      # login credentials already in ~/.docker/config.json.
+      - name: Install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz \
+            | sudo tar xz -C /usr/local/bin crane
+          crane version
       - name: Move :nightly aliases
         run: |
           set -euo pipefail
@@ -376,14 +387,14 @@ jobs:
           # move, so a mismatch cannot leave the set half-promoted.
           for img in $images; do
             want=$(jq -r --arg k "$img" '.images[$k]' "manifests/kinova-arm/$SET_ID.images.json")
-            got=$(docker buildx imagetools inspect "$REGISTRY/$img:$SET_ID" --format '{{json .Manifest}}' | jq -r .digest)
+            got=$(crane digest "$REGISTRY/$img:$SET_ID")
             test "$want" = "$got" \
               || { echo "::error::$img:$SET_ID digest $got != blessed $want"; exit 1; }
           done
           for img in $images; do
-            docker buildx imagetools create -t "$REGISTRY/$img:nightly" "$REGISTRY/$img:$SET_ID"
+            crane tag "$REGISTRY/$img:$SET_ID" nightly
             want=$(jq -r --arg k "$img" '.images[$k]' "manifests/kinova-arm/$SET_ID.images.json")
-            got=$(docker buildx imagetools inspect "$REGISTRY/$img:nightly" --format '{{json .Manifest}}' | jq -r .digest)
+            got=$(crane digest "$REGISTRY/$img:nightly")
             test "$want" = "$got" \
               || { echo "::error::$img:nightly digest $got != blessed $want"; exit 1; }
           done
