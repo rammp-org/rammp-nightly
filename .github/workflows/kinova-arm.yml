@@ -11,9 +11,10 @@
 name: kinova-arm-nightly
 
 on:
-  # Goes live in Task 3, once a manual dispatch has passed end to end.
-  # schedule:
-  #   - cron: "0 9 * * *"
+  # 09:00 UTC ≈ 4-5 am US Eastern. Enabled 2026-10-04 after the rc4
+  # rehearsal blessed a full set end to end.
+  schedule:
+    - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
       interfaces_ref:
