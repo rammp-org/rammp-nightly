@@ -163,12 +163,14 @@ jobs:
       - name: Patch interfaces fetch URL to accept a SHA
         run: |
           set -euo pipefail
-          # shellcheck disable=SC2016  # ${INTERFACES_REF} is the literal ARG
-          # reference in the Dockerfile; single quotes keep it unexpanded.
-          sed -i 's|archive/refs/tags/${INTERFACES_REF}|archive/${INTERFACES_REF}|' docker/base/Dockerfile
-          grep -q 'archive/${INTERFACES_REF}.tar.gz' docker/base/Dockerfile \
+          # The escaped \$ keeps ${INTERFACES_REF} literal: it is the ARG
+          # reference inside the Dockerfile, not a shell variable here.
+          sed -i "s|archive/refs/tags/\${INTERFACES_REF}|archive/\${INTERFACES_REF}|" docker/base/Dockerfile
+          # -F: fixed-string match — the pattern holds $ and . that regex
+          # dialects disagree about (a mid-pattern $ anchors in some greps).
+          grep -qF "archive/\${INTERFACES_REF}.tar.gz" docker/base/Dockerfile \
             || { echo "::error::interfaces URL patch did not take effect"; exit 1; }
-          ! grep -q 'archive/refs/tags/${INTERFACES_REF}' docker/base/Dockerfile \
+          ! grep -qF "archive/refs/tags/\${INTERFACES_REF}" docker/base/Dockerfile \
             || { echo "::error::tag-only interfaces URL still present after patch"; exit 1; }
       - name: Build rammp-base and rammp-cuda
         run: make base cuda VERSION="$SET_ID" INTERFACES_REF="$INTERFACES_SHA"
