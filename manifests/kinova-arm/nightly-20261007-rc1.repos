@@ -1,0 +1,21 @@
+repositories:
+  rammp-interfaces-ros2:
+    type: git
+    url: https://github.com/rammp-org/rammp-interfaces-ros2.git
+    version: 4da5d757b1d7d0d751d23806479243d009126a3c
+  RAMMP-docker:
+    type: git
+    url: https://github.com/rammp-org/RAMMP-docker.git
+    version: a526b9fc3a6c93f3c543a1fef3d5d343ad9d0860
+  kinova-gen3-driver:
+    type: git
+    url: https://github.com/rammp-org/kinova-gen3-driver.git
+    version: 20d64d0c0709f02abb2d49eeb480bf510e2aedb9
+  RAMMP-CuRobo:
+    type: git
+    url: https://github.com/rammp-org/RAMMP-CuRobo.git
+    version: 29d86a6b5e546b97318eed9189e7537273b37206
+  kinova-gen3-ros2:
+    type: git
+    url: https://github.com/rammp-org/kinova-gen3-ros2.git
+    version: c242a0408356acc483529b3823ab7d2c8b8e6818
