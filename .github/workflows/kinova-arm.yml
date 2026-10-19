@@ -11,10 +11,12 @@
 name: kinova-arm-nightly
 
 on:
-  # 09:00 UTC ≈ 4-5 am US Eastern. Enabled 2026-10-04 after the rc4
-  # rehearsal blessed a full set end to end.
+  # 05:07 UTC = 1:07 am EDT / 12:07 am EST. Enabled 2026-10-04 after the rc4
+  # rehearsal blessed a full set end to end. Off the hour on purpose: GitHub
+  # delays scheduled runs under load, worst at :00, and "0 9" started 4-10 h
+  # late (2026-10-11..18), landing after the workday began.
   schedule:
-    - cron: "0 9 * * *"
+    - cron: "7 5 * * *"
   workflow_dispatch:
     inputs:
       interfaces_ref:
