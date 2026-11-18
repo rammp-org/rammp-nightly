@@ -1,0 +1,11 @@
+{
+  "set": "nightly-20261118",
+  "stack": "kinova-arm",
+  "generated": "2026-11-18T14:01:39.557579+00:00",
+  "images": {
+    "rammp-base": "sha256:2faf7452767d94de5bd113f4a876d42894cc02f90b73fa09f08b8beba196e65e",
+    "rammp-cuda": "sha256:cfb93f551c42e560476cf0b5add188a42e11dc13c88705c902f8bb26029808ec",
+    "rammp-curobo": "sha256:d44b636a6653950ad39b688f1a464b17d63052d010e62ad83ed4bb726d5ca99e",
+    "kinova-gen3-ros2": "sha256:7f8ff62527962ecbb9223829225875d0ecec784d041428a774b434818c9530b3"
+  }
+}
